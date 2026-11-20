@@ -1,1 +1,63 @@
-.
+# Save as: .github/workflows/mirror-exe.yml
+# Run from: Actions tab -> "Download, zip (10 MB parts) and commit" -> Run workflow
+name: Download, zip (10 MB parts) and commit
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Download URL"
+        required: true
+        default: "https://download.jetbrains.com/python/pycharm-2026.3.0.1.exe"
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      URL: ${{ inputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download
+        run: |
+          FILE=$(basename "$URL")
+          NAME="${FILE%.*}"
+          echo "FILE=$FILE" >> "$GITHUB_ENV"
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          mkdir -p dl
+          curl -fL --retry 5 --retry-delay 10 -o "dl/$FILE" "$URL"
+          ls -lh dl
+
+      - name: Verify SHA-256 (JetBrains publishes <url>.sha256)
+        run: |
+          if curl -fsL -o expected.sha256 "$URL.sha256"; then
+            EXPECTED=$(awk '{print $1}' expected.sha256)
+            ACTUAL=$(sha256sum "dl/$FILE" | awk '{print $1}')
+            echo "expected: $EXPECTED"
+            echo "actual:   $ACTUAL"
+            [ "$EXPECTED" = "$ACTUAL" ] || { echo "Checksum mismatch"; exit 1; }
+          else
+            echo "No .sha256 published, skipping check"
+          fi
+
+      - name: Zip into 10 MB volumes with 7-Zip
+        run: |
+          command -v 7z >/dev/null || { sudo apt-get update && sudo apt-get install -y p7zip-full; }
+          OUT="binaries/$NAME"
+          mkdir -p "$OUT"
+          # Produces NAME.zip.001, NAME.zip.002, ... (open .001 in 7-Zip to extract)
+          7z a -tzip -v10m "$OUT/$NAME.zip" "./dl/$FILE"
+          sha256sum "dl/$FILE" | sed "s#dl/##" > "$OUT/$FILE.sha256"
+          ls -lh "$OUT"
+          echo "Parts: $(ls "$OUT"/*.zip.* | wc -l)"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "binaries/$NAME"
+          git commit -m "Add $NAME (7-Zip split zip, 10 MB parts)"
+          git push
